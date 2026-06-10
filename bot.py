@@ -1,11 +1,14 @@
 import os
+import threading
 import logging
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ---------- НАСТРОЙКИ (укажите свои) ----------
-BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"          # получить у @BotFather
-ADMIN_CHAT_ID = -1001234567890                # ID вашей закрытой группы (с минусом)
+# ---------- НАСТРОЙКИ (замените на свои) ----------
+BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"
+ADMIN_CHAT_ID = -1001234567890  # ID вашей группы с минусом
 # ---------------------------------------------
 
 logging.basicConfig(
@@ -35,16 +38,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-
     if not msg.reply_to_message:
         return
-
     original_msg_id = msg.reply_to_message.message_id
     user_id = message_map.get(original_msg_id)
-
     if not user_id:
         return
-
     try:
         await msg.copy(chat_id=user_id)
         await msg.reply_text("✅ Ответ отправлен пользователю.")
@@ -52,28 +51,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Ошибка отправки ответа пользователю {user_id}: {e}")
         await msg.reply_text("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & ~filters.COMMAND,
-        handle_user_message
-    ))
-
-    app.add_handler(MessageHandler(
-        filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY,
-        handle_admin_reply
-    ))
-
-    logger.info("Бот запущен и готов к работе...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
-# Фиктивный веб-сервер, чтобы Render видел открытый порт
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
+# Фиктивный веб-сервер для Render (отвечает на health check)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -85,4 +63,23 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
-threading.Thread(target=run_health_server, daemon=True).start()
+def main():
+    # Запускаем веб-сервер в отдельном потоке ДО запуска бота
+    threading.Thread(target=run_health_server, daemon=True).start()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_user_message
+    ))
+    app.add_handler(MessageHandler(
+        filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY,
+        handle_admin_reply
+    ))
+
+    logger.info("Бот запущен и готов к работе...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
