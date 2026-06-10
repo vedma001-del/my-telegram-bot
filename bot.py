@@ -8,7 +8,7 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # ---------- НАСТРОЙКИ (замените на свои) ----------
 BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"
-ADMIN_CHAT_ID = -1001234567890  # ID вашей группы с минусом
+ADMIN_CHAT_ID = -1003725679213  # ID вашей группы с минусом
 # ---------------------------------------------
 
 logging.basicConfig(
