@@ -2,13 +2,15 @@ import os
 import threading
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime, timezone
 
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
 # ---------- НАСТРОЙКИ (замените на свои) ----------
 BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"
-ADMIN_CHAT_ID = -1003725679213  # ID вашей группы с минусом
+ADMIN_CHAT_ID = -1003725679213       # ID группы администраторов (куда пересылаются запросы)
+ARCHIVE_GROUP_ID = -1003908640963    # ID группы-архива (куда дублируются заявки)
 # ---------------------------------------------
 
 logging.basicConfig(
@@ -19,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 message_map = {}
 
+# Клавиатура с кнопками для пользователей
+BUTTONS = [
+    [KeyboardButton("🚢 Рассчитать маршрут"), KeyboardButton("💰 Запросить ставку")],
+    [KeyboardButton("📞 Связаться с менеджером"), KeyboardButton("📋 Другое")]
+]
+reply_keyboard = ReplyKeyboardMarkup(BUTTONS, resize_keyboard=True, one_time_keyboard=False)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приветствие и показ кнопок."""
+    await update.message.reply_text(
+        "👋 Добро пожаловать в Wenge Group!\n\n"
+        "Выберите, что вас интересует, или просто напишите свой запрос — мы ответим в ближайшее время.",
+        reply_markup=reply_keyboard
+    )
+
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
@@ -26,6 +43,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_info = f"@{user.username}" if user.username else user.full_name
     caption = f"📩 Сообщение от {user_info} (ID: {user.id})"
 
+    # 1. Пересылаем сообщение в админский чат
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
@@ -33,7 +51,23 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_to_message_id=forwarded.message_id
     )
 
+    # 2. Сохраняем в архивную группу
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    archive_text = (
+        f"📥 Новая заявка\n"
+        f"🕒 {now}\n"
+        f"👤 {user_info} (ID: {user.id})\n"
+        f"💬 {msg.text or '[не текст]'}"
+    )
+    try:
+        await context.bot.send_message(chat_id=ARCHIVE_GROUP_ID, text=archive_text)
+    except Exception as e:
+        logger.error(f"Не удалось отправить в архив: {e}")
+
+    # 3. Запоминаем связку для ответа
     message_map[forwarded.message_id] = user.id
+
+    # 4. Подтверждение клиенту
     await msg.reply_text("✅ Ваше сообщение отправлено администраторам. Ожидайте ответа.")
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -51,7 +85,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Ошибка отправки ответа пользователю {user_id}: {e}")
         await msg.reply_text("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
 
-# Фиктивный веб-сервер для Render (отвечает на health check)
+# Фиктивный веб-сервер для Render
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -64,11 +98,11 @@ def run_health_server():
     server.serve_forever()
 
 def main():
-    # Запускаем веб-сервер в отдельном потоке ДО запуска бота
     threading.Thread(target=run_health_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_user_message
