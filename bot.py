@@ -21,11 +21,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Хранилища
 message_map = {}         # {forwarded_msg_id: {"user_id": uid, "answered": False}}
 user_requests = {}       # {user_id: [{"date": "...", "text": "..."}, ...]}
 
-# Клавиатура для пользователей
 BUTTONS = [
     [KeyboardButton("🚢 Рассчитать маршрут"), KeyboardButton("💰 Запросить ставку")],
     [KeyboardButton("📞 Связаться с менеджером"), KeyboardButton("📋 Другое")],
@@ -33,27 +31,25 @@ BUTTONS = [
 ]
 reply_keyboard = ReplyKeyboardMarkup(BUTTONS, resize_keyboard=True, one_time_keyboard=False)
 
-# Кнопки, требующие уточнения
 DETAIL_BUTTONS = {"🚢 Рассчитать маршрут", "💰 Запросить ставку"}
-# Кнопка истории
 HISTORY_BUTTON = "📋 Мои заявки"
 
+WELCOME_TEXT = (
+    "👋 Добро пожаловать в Wenge Group!\n\n"
+    "Выберите, что вас интересует, или просто напишите свой запрос — мы ответим в ближайшее время."
+)
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Добро пожаловать в Wenge Group!\n\n"
-        "Выберите, что вас интересует, или просто напишите свой запрос — мы ответим в ближайшее время.",
-        reply_markup=reply_keyboard
-    )
+    """Принудительный показ меню (если пользователь всё же напишет /start)."""
+    await update.message.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
 
 def save_to_history(user_id, text):
-    """Сохраняет запрос в историю пользователя."""
     if user_id not in user_requests:
         user_requests[user_id] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     user_requests[user_id].append({"date": now, "text": text})
 
 async def remind_later(context, chat_id, message_id, delay_minutes):
-    """Напоминание, если админ не ответил."""
     await asyncio.sleep(delay_minutes * 60)
     data = message_map.get(message_id)
     if data and not data.get("answered", False):
@@ -71,13 +67,24 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user_info = f"@{user.username}" if user.username else user.full_name
 
+    # Если пользователь новый (ещё нет истории), показываем приветствие с кнопками,
+    # но не пересылаем админам это первое сообщение
+    if user.id not in user_requests:
+        # Отправляем приветствие с клавиатурой
+        await msg.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
+        # Записываем пустую историю, чтобы больше не срабатывало
+        user_requests[user.id] = []
+        # Если это была именно команда /start, то она уже обработана через CommandHandler,
+        # но на всякий случай оставим. Не пересылаем.
+        return
+
     # Кнопка «Мои заявки»
     if msg.text and msg.text.strip() == HISTORY_BUTTON:
         requests = user_requests.get(user.id, [])
         if not requests:
             await msg.reply_text("📭 У вас пока нет отправленных заявок.")
         else:
-            last_requests = requests[-5:]  # последние 5
+            last_requests = requests[-5:]
             text = "📋 Ваши последние заявки:\n\n"
             for i, req in enumerate(last_requests, 1):
                 text += f"{i}. [{req['date']}] {req['text']}\n"
@@ -98,10 +105,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Обработка любого контента (текст, фото, файлы)
+    # --- Обработка обычного запроса (текст, файлы и т.д.) ---
     caption = f"📩 Сообщение от {user_info} (ID: {user.id})"
-
-    # Пересылаем сообщение (работает для любых типов)
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
@@ -109,7 +114,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_to_message_id=forwarded.message_id
     )
 
-    # Определяем текст для истории и архива
+    # Определяем текстовое представление для истории и архива
     if msg.text:
         content_text = msg.text
     elif msg.caption:
@@ -125,10 +130,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         content_text = "[Сообщение]"
 
-    # Сохраняем в историю
     save_to_history(user.id, content_text)
 
-    # Архивная группа
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     archive_text = (
         f"📥 Новая заявка\n"
@@ -141,13 +144,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Не удалось отправить в архив: {e}")
 
-    # Запоминаем для ответа и напоминания
     message_map[forwarded.message_id] = {
         "user_id": user.id,
         "answered": False
     }
-
-    # Запускаем напоминание
     asyncio.create_task(
         remind_later(context, ADMIN_CHAT_ID, forwarded.message_id, REMINDER_MINUTES)
     )
@@ -162,7 +162,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = message_map.get(original_msg_id)
     if not data:
         return
-    # Помечаем, что ответили
     data["answered"] = True
     user_id = data["user_id"]
     try:
@@ -172,7 +171,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Ошибка отправки ответа пользователю {user_id}: {e}")
         await msg.reply_text("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
 
-# Фиктивный веб-сервер для Render
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
