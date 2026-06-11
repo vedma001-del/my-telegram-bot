@@ -12,7 +12,6 @@ from telegram import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardRemove,
 )
 from telegram.ext import (
     Application,
@@ -48,6 +47,8 @@ MENU_BUTTONS = {"💰 Запросить ставку", "📋 Другое", "�
 DETAIL_BUTTONS = {"💰 Запросить ставку", "📋 Другое"}
 HISTORY_BUTTON = "📋 Мои заявки"
 
+ADMIN_BUTTONS = {"📊 Статистика", "👩💼 Контакты Валерии", "👨💼 Контакты Антона", "✅ Закрыть заявку"}
+
 def get_user_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("💰 Запросить ставку"), KeyboardButton("📋 Другое")],
@@ -70,7 +71,7 @@ def get_channel_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")]])
 
 async def admin_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для принудительной установки админской клавиатуры."""
+    """Принудительная установка админской клавиатуры."""
     await update.message.reply_text("✅ Админская клавиатура обновлена.", reply_markup=get_admin_keyboard())
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -91,7 +92,12 @@ async def remind_later(context, chat_id, message_id, delay_minutes):
     data = message_map.get(message_id)
     if data and not data.get("answered", False):
         try:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ На эту заявку не ответили уже {delay_minutes} минут.", reply_to_message_id=message_id)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ На эту заявку не ответили уже {delay_minutes} минут.",
+                reply_to_message_id=message_id,
+                reply_markup=get_admin_keyboard()
+            )
         except Exception as e:
             logger.error(f"Ошибка отправки напоминания: {e}")
 
@@ -123,14 +129,34 @@ async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text)
 
 async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ВСЕХ сообщений в админском чате (кроме reply)."""
     msg = update.message
-    if not msg.text: return
+    
+    # Если сообщение пустое — игнорируем
+    if not msg or not msg.text:
+        return
+    
+    # Обработка кнопки «📊 Статистика»
     if msg.text == "📊 Статистика":
-        today, answered = stats["today"], stats["answered"]
-        avg = str(stats["total_response_time"] / answered).split(".")[0] if answered else "—"
-        await msg.reply_text(f"📊 Статистика за сегодня:\n• Заявок: {today}\n• Отвечено: {answered}\n• Среднее время ответа: {avg}", reply_markup=get_admin_keyboard())
-    elif msg.text in ["👩💼 Контакты Валерии", "👨💼 Контакты Антона", "✅ Закрыть заявку"]:
-        await msg.reply_text("❗ Используйте эту кнопку reply'ем на сообщение клиента.", reply_markup=get_admin_keyboard())
+        today = stats["today"]
+        answered = stats["answered"]
+        avg_time = str(stats["total_response_time"] / answered).split(".")[0] if answered else "—"
+        await msg.reply_text(
+            f"📊 Статистика за сегодня:\n"
+            f"• Заявок: {today}\n"
+            f"• Отвечено: {answered}\n"
+            f"• Среднее время ответа: {avg_time}",
+            reply_markup=get_admin_keyboard()
+        )
+        return
+    
+    # Обработка других кнопок (требуют reply)
+    if msg.text in ["👩💼 Контакты Валерии", "👨💼 Контакты Антона", "✅ Закрыть заявку"]:
+        await msg.reply_text(
+            "❗ Используйте эту кнопку reply'ем на сообщение клиента.",
+            reply_markup=get_admin_keyboard()
+        )
+        return
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -188,7 +214,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     save_to_history(user.id, content_text)
     caption = f"📩 {user_info} (ID: {user.id})"
     forwarded = await context.bot.forward_message(chat_id=ADMIN_CHAT_ID, from_chat_id=msg.chat_id, message_id=msg.message_id)
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_to_message_id=forwarded.message_id)
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=caption,
+        reply_to_message_id=forwarded.message_id,
+        reply_markup=get_admin_keyboard()
+    )
 
     if user.id not in active_requests:
         c = user_contacts.get(user.id, {})
@@ -205,38 +236,55 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await msg.reply_text("✅ Сообщение отправлено. Ожидайте ответа.", reply_markup=get_user_keyboard())
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик reply'ев в админском чате."""
     msg = update.message
-    if not msg.reply_to_message: return
-    data = message_map.get(msg.reply_to_message.message_id)
-    if not data: return
+    if not msg.reply_to_message: 
+        return
+    
+    original_msg_id = msg.reply_to_message.message_id
+    data = message_map.get(original_msg_id)
+    
+    if not data:
+        await msg.reply_text("Это сообщение не является заявкой клиента.", reply_markup=get_admin_keyboard())
+        return
+    
     user_id = data["user_id"]
 
     if msg.text:
         if msg.text == "👩💼 Контакты Валерии":
             try:
                 await context.bot.send_message(chat_id=user_id, text=CONTACT_VALERIA)
-                await msg.reply_text("✅ Контакты Валерии отправлены.", reply_markup=get_admin_keyboard())
-            except: await msg.reply_text("❌ Ошибка.", reply_markup=get_admin_keyboard())
+                await msg.reply_text("✅ Контакты Валерии отправлены клиенту.", reply_markup=get_admin_keyboard())
+            except:
+                await msg.reply_text("❌ Ошибка отправки.", reply_markup=get_admin_keyboard())
             return
+        
         if msg.text == "👨💼 Контакты Антона":
             try:
                 await context.bot.send_message(chat_id=user_id, text=CONTACT_ANTON)
-                await msg.reply_text("✅ Контакты Антона отправлены.", reply_markup=get_admin_keyboard())
-            except: await msg.reply_text("❌ Ошибка.", reply_markup=get_admin_keyboard())
+                await msg.reply_text("✅ Контакты Антона отправлены клиенту.", reply_markup=get_admin_keyboard())
+            except:
+                await msg.reply_text("❌ Ошибка отправки.", reply_markup=get_admin_keyboard())
             return
+        
         if msg.text == "✅ Закрыть заявку":
             await update_archive(context, user_id, "✅ Закрыт")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("👍", callback_data=f"rating_yes_{user_id}"), InlineKeyboardButton("👎", callback_data=f"rating_no_{user_id}")]])
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👍", callback_data=f"rating_yes_{user_id}"),
+                 InlineKeyboardButton("👎", callback_data=f"rating_no_{user_id}")]
+            ])
             try:
-                await context.bot.send_message(chat_id=user_id, text="Запрос закрыт. Оцените:", reply_markup=kb)
+                await context.bot.send_message(chat_id=user_id, text="Ваш запрос закрыт. Оцените качество обслуживания:", reply_markup=kb)
                 await msg.reply_text("✅ Заявка закрыта.", reply_markup=get_admin_keyboard())
-            except: await msg.reply_text("❌ Ошибка.", reply_markup=get_admin_keyboard())
+            except:
+                await msg.reply_text("❌ Ошибка при закрытии.", reply_markup=get_admin_keyboard())
             return
 
     data["answered"] = True
     try:
         await msg.copy(chat_id=user_id, reply_markup=get_user_keyboard())
-        await msg.reply_text("✅ Ответ отправлен.", reply_markup=get_admin_keyboard())
+        await msg.reply_text("✅ Ответ отправлен клиенту.", reply_markup=get_admin_keyboard())
+        
         if "request_time" in data:
             stats["total_response_time"] += datetime.now(timezone.utc) - data["request_time"]
             stats["answered"] += 1
@@ -249,7 +297,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     today, answered = stats["today"], stats["answered"]
     avg = str(stats["total_response_time"] / answered).split(".")[0] if answered else "—"
-    await msg.reply_text(f"📊 Статистика:\n• Заявок: {today}\n• Отвечено: {answered}\n• Среднее время: {avg}", reply_markup=get_admin_keyboard())
+    await msg.reply_text(
+        f"📊 Статистика за сегодня:\n• Заявок: {today}\n• Отвечено: {answered}\n• Среднее время ответа: {avg}",
+        reply_markup=get_admin_keyboard()
+    )
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -263,13 +314,25 @@ def run_health_server():
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("admin", admin_keyboard_command))  # НОВАЯ КОМАНДА
+    app.add_handler(CommandHandler("admin", admin_keyboard_command))
     app.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rating_"))
-    app.add_handler(MessageHandler(filters.Chat(chat_id=ADMIN_CHAT_ID) & ~filters.REPLY & ~filters.COMMAND, handle_admin_message))
-    app.add_handler(MessageHandler(filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY, handle_admin_reply))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_user_message))
+    
+    app.add_handler(MessageHandler(
+        filters.Chat(chat_id=ADMIN_CHAT_ID) & ~filters.REPLY & ~filters.COMMAND,
+        handle_admin_message
+    ))
+    app.add_handler(MessageHandler(
+        filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY,
+        handle_admin_reply
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_user_message
+    ))
+    
     logger.info("Бот запущен и готов к работе...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
