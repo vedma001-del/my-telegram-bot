@@ -3,49 +3,80 @@ import asyncio
 import threading
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    CommandHandler,
+    CallbackQueryHandler,
+)
 
 # ---------- НАСТРОЙКИ (замените на свои) ----------
 BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"
 ADMIN_CHAT_ID = -1003725679213       # ID группы администраторов (куда пересылаются запросы)
 ARCHIVE_GROUP_ID = -1003908640963    # ID группы-архива (куда дублируются заявки)
-REMINDER_MINUTES = 30               # через сколько минут напоминать
+CHANNEL_USERNAME = "WengeGroup"  # юзернейм канала (без @)
+REMINDER_MINUTES = 30
+
+# Контакты менеджеров
+CONTACT_VALERIA = "👩💼 Валерия\nТелефон: +7 (993) 903-36-33\nTelegram: @Valeria_Wenge"
+CONTACT_ANTON = "👨💼 Антон\nТелефон: +7 (967) 006-02-86\nTelegram: @AntonWenge"
 # ---------------------------------------------
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-message_map = {}         # {forwarded_msg_id: {"user_id": uid, "answered": False}}
-user_requests = {}       # {user_id: [{"date": "...", "text": "..."}, ...]}
+# Хранилища
+message_map = {}
+user_requests = defaultdict(list)
+user_contacts = {}
+user_state = {}
+stats = {"today": 0, "answered": 0, "total_response_time": timedelta()}
 
+# Клавиатура для пользователей
 BUTTONS = [
     [KeyboardButton("🚢 Рассчитать маршрут"), KeyboardButton("💰 Запросить ставку")],
-    [KeyboardButton("📞 Связаться с менеджером"), KeyboardButton("📋 Другое")],
-    [KeyboardButton("📋 Мои заявки")]
+    [KeyboardButton("📋 Мои заявки"), KeyboardButton("📋 Другое")],
 ]
 reply_keyboard = ReplyKeyboardMarkup(BUTTONS, resize_keyboard=True, one_time_keyboard=False)
 
-DETAIL_BUTTONS = {"🚢 Рассчитать маршрут", "💰 Запросить ставку"}
+# Кнопки, требующие уточнения (не пересылаются админам сразу)
+DETAIL_BUTTONS = {"🚢 Рассчитать маршрут", "💰 Запросить ставку", "📋 Другое"}
 HISTORY_BUTTON = "📋 Мои заявки"
+OTHER_BUTTON = "📋 Другое"
 
 WELCOME_TEXT = (
     "👋 Добро пожаловать в Wenge Group!\n\n"
     "Выберите, что вас интересует, или просто напишите свой запрос — мы ответим в ближайшее время."
 )
 
+def get_channel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")]
+    ])
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принудительный показ меню (если пользователь всё же напишет /start)."""
     await update.message.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
+    await update.message.reply_text(
+        "Будьте в курсе новостей логистики:",
+        reply_markup=get_channel_keyboard(),
+    )
 
 def save_to_history(user_id, text):
-    if user_id not in user_requests:
-        user_requests[user_id] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     user_requests[user_id].append({"date": now, "text": text})
 
@@ -57,28 +88,96 @@ async def remind_later(context, chat_id, message_id, delay_minutes):
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"⚠️ На эту заявку не ответили уже {delay_minutes} минут.",
-                reply_to_message_id=message_id
+                reply_to_message_id=message_id,
             )
         except Exception as e:
             logger.error(f"Ошибка отправки напоминания: {e}")
+
+# Callback для отправки контактов админом (выбор менеджера)
+async def send_contact_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # "sendcontact_valeria_<user_id>" или "sendcontact_anton_<user_id>"
+    parts = data.split("_")
+    manager = parts[1]  # valeria или anton
+    user_id = int(parts[2])
+
+    if manager == "valeria":
+        text = CONTACT_VALERIA
+        manager_name = "Валерии"
+    else:
+        text = CONTACT_ANTON
+        manager_name = "Антона"
+
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+        await query.edit_message_text(f"✅ Контакты {manager_name} отправлены клиенту.")
+    except Exception as e:
+        logger.error(f"Ошибка отправки контактов клиенту {user_id}: {e}")
+        await query.edit_message_text("❌ Не удалось отправить контакты. Возможно, клиент заблокировал бота.")
+
+# Callback для оценки
+async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, rating, user_id_str = query.data.split("_")
+    user_id = int(user_id_str)
+    if rating == "yes":
+        text = "👍 Спасибо за вашу оценку!"
+    else:
+        text = "👎 Спасибо за обратную связь, мы постараемся улучшить сервис."
+    await query.edit_message_text(text)
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
     user_info = f"@{user.username}" if user.username else user.full_name
 
-    # Если пользователь новый (ещё нет истории), показываем приветствие с кнопками,
-    # но не пересылаем админам это первое сообщение
-    if user.id not in user_requests:
-        # Отправляем приветствие с клавиатурой
-        await msg.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
-        # Записываем пустую историю, чтобы больше не срабатывало
-        user_requests[user.id] = []
-        # Если это была именно команда /start, то она уже обработана через CommandHandler,
-        # но на всякий случай оставим. Не пересылаем.
+    # Сбор контактов (имя и телефон)
+    if user.id in user_state:
+        state = user_state[user.id]
+        if state == "awaiting_name":
+            user_contacts.setdefault(user.id, {})["name"] = msg.text
+            user_state[user.id] = "awaiting_phone"
+            await msg.reply_text(
+                "📞 Отправьте ваш номер телефона, чтобы мы могли оперативно связаться.",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("📱 Поделиться номером", request_contact=True)]],
+                    resize_keyboard=True,
+                    one_time_keyboard=True,
+                ),
+            )
+            return
+        elif state == "awaiting_phone":
+            if msg.contact:
+                phone = msg.contact.phone_number
+            else:
+                phone = msg.text
+            user_contacts.setdefault(user.id, {})["phone"] = phone
+            del user_state[user.id]
+            await msg.reply_text(
+                "✅ Контакты сохранены! Теперь напишите ваш запрос, и мы сразу ответим.",
+                reply_markup=reply_keyboard,
+            )
+            return
+
+    # Новый пользователь → запрос контактов
+    if user.id not in user_contacts:
+        user_state[user.id] = "awaiting_name"
+        await msg.reply_text(
+            "👤 Для начала, пожалуйста, представьтесь. Напишите ваше имя:",
+            reply_markup=reply_keyboard,
+        )
         return
 
-    # Кнопка «Мои заявки»
+    # Первое сообщение после регистрации → приветствие
+    if user.id not in user_requests or len(user_requests[user.id]) == 0:
+        await msg.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
+        await msg.reply_text("Будьте в курсе новостей логистики:", reply_markup=get_channel_keyboard())
+        user_requests[user.id] = []
+        return
+
+    # История заявок
     if msg.text and msg.text.strip() == HISTORY_BUTTON:
         requests = user_requests.get(user.id, [])
         if not requests:
@@ -91,40 +190,57 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(text)
         return
 
-    # Кнопки, требующие уточнения
+    # Кнопки, требующие уточнения («Рассчитать маршрут», «Запросить ставку», «Другое»)
     if msg.text and msg.text.strip() in DETAIL_BUTTONS:
-        await msg.reply_text(
-            "📋 Для отправки запроса, пожалуйста, укажите:\n"
-            "• Что за груз (наименование, вес, объём)\n"
-            "• Откуда и куда\n"
-            "• Характеристики груза (опасный, температурный режим и пр.)\n"
-            "• Условия поставки (EXW, FOB, FCA и т.д.)\n"
-            "• Предпочтительный вид транспорта (авиа, ж/д, авто, море)\n\n"
-            "Просто напишите всё, что знаете — мы оперативно рассчитаем.",
-            reply_markup=reply_keyboard
-        )
+        if msg.text.strip() == OTHER_BUTTON:
+            await msg.reply_text(
+                "📋 Напишите, что вас интересует, или задайте ваш вопрос — мы ответим в ближайшее время.",
+                reply_markup=reply_keyboard,
+            )
+        else:
+            await msg.reply_text(
+                "📋 Для отправки запроса, пожалуйста, укажите:\n"
+                "• Что за груз (наименование, вес, объём)\n"
+                "• Откуда и куда\n"
+                "• Характеристики груза (опасный, температурный режим и пр.)\n"
+                "• Условия поставки (EXW, FOB, FCA и т.д.)\n"
+                "• Предпочтительный вид транспорта (авиа, ж/д, авто, море)\n\n"
+                "Просто напишите всё, что знаете — мы оперативно рассчитаем.",
+                reply_markup=reply_keyboard,
+            )
         return
 
-    # --- Обработка обычного запроса (текст, файлы и т.д.) ---
+    # Обычная заявка (любой другой текст или медиа)
+    contact = user_contacts.get(user.id, {})
+    name = contact.get("name", "")
+    phone = contact.get("phone", "")
+    contact_str = ""
+    if name:
+        contact_str += f"👤 {name}"
+    if phone:
+        contact_str += f" | 📞 {phone}"
     caption = f"📩 Сообщение от {user_info} (ID: {user.id})"
+    if contact_str:
+        caption += "\n" + contact_str
+
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=caption,
-        reply_to_message_id=forwarded.message_id
+        reply_to_message_id=forwarded.message_id,
     )
 
-    # Определяем текстовое представление для истории и архива
+    # Определяем текстовое представление для архива и истории
     if msg.text:
         content_text = msg.text
     elif msg.caption:
-        content_text = f"[Фото/файл] {msg.caption}"
+        content_text = f"[Файл] {msg.caption}"
     elif msg.photo:
         content_text = "[Фото]"
     elif msg.document:
         content_text = "[Документ]"
     elif msg.voice:
-        content_text = "[Голосовое сообщение]"
+        content_text = "[Голосовое]"
     elif msg.video:
         content_text = "[Видео]"
     else:
@@ -137,6 +253,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"📥 Новая заявка\n"
         f"🕒 {now}\n"
         f"👤 {user_info} (ID: {user.id})\n"
+        f"{contact_str}\n"
         f"💬 {content_text}"
     )
     try:
@@ -144,10 +261,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Не удалось отправить в архив: {e}")
 
+    request_time = datetime.now(timezone.utc)
     message_map[forwarded.message_id] = {
         "user_id": user.id,
-        "answered": False
+        "answered": False,
+        "request_time": request_time,
     }
+    stats["today"] += 1
+
     asyncio.create_task(
         remind_later(context, ADMIN_CHAT_ID, forwarded.message_id, REMINDER_MINUTES)
     )
@@ -162,14 +283,63 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = message_map.get(original_msg_id)
     if not data:
         return
+
+    # Команда /contacts с выбором менеджера (только для админов)
+    if msg.text and msg.text.startswith("/contacts"):
+        user_id = data["user_id"]
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👩💼 Валерия", callback_data=f"sendcontact_valeria_{user_id}"),
+                InlineKeyboardButton("👨💼 Антон", callback_data=f"sendcontact_anton_{user_id}"),
+            ]
+        ])
+        await msg.reply_text("Выберите менеджера для отправки контактов:", reply_markup=keyboard)
+        return
+
+    # Обычный ответ (reply)
     data["answered"] = True
     user_id = data["user_id"]
     try:
         await msg.copy(chat_id=user_id)
         await msg.reply_text("✅ Ответ отправлен пользователю.")
+
+        if "request_time" in data:
+            response_time = datetime.now(timezone.utc) - data["request_time"]
+            stats["total_response_time"] += response_time
+            stats["answered"] += 1
+
+        # Оценка качества ответа
+        rating_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👍", callback_data=f"rating_yes_{user_id}"),
+                InlineKeyboardButton("👎", callback_data=f"rating_no_{user_id}"),
+            ]
+        ])
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Понравился ли вам ответ?",
+            reply_markup=rating_keyboard,
+        )
     except Exception as e:
         logger.error(f"Ошибка отправки ответа пользователю {user_id}: {e}")
         await msg.reply_text("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    today = stats["today"]
+    answered = stats["answered"]
+    avg_time = (
+        str(stats["total_response_time"] / answered).split(".")[0]
+        if answered > 0
+        else "—"
+    )
+    text = (
+        f"📊 Статистика за сегодня:\n"
+        f"• Заявок: {today}\n"
+        f"• Отвечено: {answered}\n"
+        f"• Среднее время ответа: {avg_time}"
+    )
+    await msg.reply_text(text)
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -188,13 +358,16 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CallbackQueryHandler(send_contact_callback, pattern=r"^sendcontact_"))
+    app.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rating_"))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND,
-        handle_user_message
+        handle_user_message,
     ))
     app.add_handler(MessageHandler(
         filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY,
-        handle_admin_reply
+        handle_admin_reply,
     ))
 
     logger.info("Бот запущен и готов к работе...")
