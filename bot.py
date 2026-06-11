@@ -24,8 +24,9 @@ from telegram.ext import (
 
 # ---------- НАСТРОЙКИ (замените на свои) ----------
 BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"
-ADMIN_CHAT_ID = -1003725679213       # ID группы администраторов (куда пересылаются запросы)
-ARCHIVE_GROUP_ID = -1003908640963    # ID группы-архива (куда дублируются заявки)
+ADMIN_CHAT_ID = -1003725679213       # ID группы администраторов
+ARCHIVE_GROUP_ID = -1003908640963    # ID группы-архива заявок
+CHANNEL_ID = -1001111111111         # ID канала для публикации
 CHANNEL_USERNAME = "WengeGroup"  # юзернейм канала (без @)
 REMINDER_MINUTES = 30
 
@@ -41,14 +42,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Хранилища
-message_map = {}  # {forwarded_msg_id: {"user_id": uid, "answered": False, "request_time": datetime}}
-user_requests = defaultdict(list)  # история сообщений пользователя
-user_contacts = {}  # контакты пользователей
-user_state = {}  # состояние сбора контактов
-active_requests = {}  # {user_id: {"archive_msg_id": id, "status": "🆕 Новый", "messages": []}}
+message_map = {}
+user_requests = defaultdict(list)
+user_contacts = {}
+user_state = {}
+active_requests = {}
 stats = {"today": 0, "answered": 0, "total_response_time": timedelta()}
 
-# Клавиатура для пользователей (без «Рассчитать маршрут»)
+# Клавиатура для пользователей
 BUTTONS = [
     [KeyboardButton("💰 Запросить ставку"), KeyboardButton("📋 Другое")],
     [KeyboardButton("📋 Мои заявки")],
@@ -96,7 +97,6 @@ async def remind_later(context, chat_id, message_id, delay_minutes):
             logger.error(f"Ошибка отправки напоминания: {e}")
 
 async def update_archive(context, user_id, status, new_message=None):
-    """Обновляет сообщение в архивной группе."""
     if user_id not in active_requests:
         return
     try:
@@ -110,9 +110,7 @@ async def update_archive(context, user_id, status, new_message=None):
         contact_str = f"👤 {name}"
         if phone:
             contact_str += f" | 📞 {phone}"
-        
-        # Формируем текст с историей сообщений
-        history = "\n".join(msgs[-10:])  # последние 10 сообщений
+        history = "\n".join(msgs[-10:])
         text = (
             f"📥 Заявка #{user_id}\n"
             f"👤 {contact_str}\n"
@@ -155,12 +153,25 @@ async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "👎 Спасибо за обратную связь, мы постараемся улучшить сервис."
     await query.edit_message_text(text)
 
+async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg.text or len(msg.text.split(maxsplit=1)) < 2:
+        await msg.reply_text("❗ Используйте: /post Текст публикации\nПример: /post 🚀 Стартует новая консолидация из Китая!")
+        return
+    post_text = msg.text.split(maxsplit=1)[1]
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=post_text)
+        await msg.reply_text("✅ Опубликовано в канале.")
+    except Exception as e:
+        logger.error(f"Ошибка публикации: {e}")
+        await msg.reply_text("❌ Не удалось опубликовать. Проверьте, что бот является администратором канала с правом публикации.")
+
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
     user_info = f"@{user.username}" if user.username else user.full_name
 
-    # Сбор контактов
+    # === СБОР КОНТАКТОВ (только если пользователь в процессе сбора) ===
     if user.id in user_state:
         state = user_state[user.id]
         if state == "awaiting_name":
@@ -179,18 +190,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             user_contacts.setdefault(user.id, {})["phone"] = phone
             del user_state[user.id]
             await msg.reply_text(
-                "✅ Контакты сохранены! Теперь напишите ваш запрос.",
+                "✅ Контакты сохранены! Напишите ваш вопрос — мы ответим в ближайшее время.",
                 reply_markup=reply_keyboard,
             )
             return
 
-    # Новый пользователь
-    if user.id not in user_contacts:
-        user_state[user.id] = "awaiting_name"
-        await msg.reply_text("👤 Представьтесь, пожалуйста. Напишите ваше имя:", reply_markup=reply_keyboard)
-        return
-
-    # История
+    # === ИСТОРИЯ ===
     if msg.text and msg.text.strip() == HISTORY_BUTTON:
         requests = user_requests.get(user.id, [])
         if not requests:
@@ -203,11 +208,24 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(text)
         return
 
-    # Кнопки-уточнители
+    # === КНОПКИ-УТОЧНИТЕЛИ ===
     if msg.text and msg.text.strip() in DETAIL_BUTTONS:
         if msg.text.strip() == "📋 Другое":
-            await msg.reply_text("📋 Напишите ваш вопрос — мы ответим в ближайшее время.", reply_markup=reply_keyboard)
-        else:
+            # Проверяем, есть ли уже контакты
+            if user.id not in user_contacts:
+                # Запрашиваем контакты
+                user_state[user.id] = "awaiting_name"
+                await msg.reply_text(
+                    "👤 Для связи с вами, пожалуйста, представьтесь. Напишите ваше имя:",
+                    reply_markup=reply_keyboard,
+                )
+            else:
+                # Контакты уже есть — сразу просим вопрос
+                await msg.reply_text(
+                    "📋 Напишите ваш вопрос — мы ответим в ближайшее время.",
+                    reply_markup=reply_keyboard,
+                )
+        else:  # «💰 Запросить ставку»
             await msg.reply_text(
                 "📋 Для расчёта ставки, пожалуйста, укажите:\n"
                 "• Что за груз (наименование, вес, объём)\n"
@@ -220,7 +238,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
 
-    # Обычное сообщение → это продолжение заявки или новый запрос
+    # === ОБЫЧНОЕ СООБЩЕНИЕ (запрос) ===
     content_text = msg.text or "[Сообщение]"
     if msg.caption:
         content_text = f"[Файл] {msg.caption}"
@@ -231,14 +249,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     save_to_history(user.id, content_text)
 
-    # Пересылаем админам
     caption = f"📩 {user_info} (ID: {user.id})"
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_to_message_id=forwarded.message_id)
 
-    # Архив: создаём или обновляем
     if user.id not in active_requests:
-        # Новая заявка
         contact = user_contacts.get(user.id, {})
         name = contact.get("name", "Неизвестный")
         phone = contact.get("phone", "")
@@ -254,8 +269,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             "messages": [content_text]
         }
     else:
-        # Обновляем существующую
-        active_requests[user.id]["status"] = "🔄 В работе"
         await update_archive(context, user.id, "🔄 В работе", content_text)
 
     message_map[forwarded.message_id] = {
@@ -278,7 +291,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     user_id = data["user_id"]
 
-    # Команда /contacts
     if msg.text and msg.text.startswith("/contacts"):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("👩💼 Валерия", callback_data=f"sendcontact_valeria_{user_id}"),
@@ -287,10 +299,8 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.reply_text("Выберите менеджера:", reply_markup=keyboard)
         return
 
-    # Команда /close – закрыть заявку и запросить отзыв
     if msg.text and msg.text.startswith("/close"):
         await update_archive(context, user_id, "✅ Закрыт")
-        # Отправляем отзыв клиенту
         rating_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("👍", callback_data=f"rating_yes_{user_id}"),
              InlineKeyboardButton("👎", callback_data=f"rating_no_{user_id}")]
@@ -302,7 +312,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Ошибка при закрытии: {e}")
         return
 
-    # Обычный ответ
     data["answered"] = True
     try:
         await msg.copy(chat_id=user_id)
@@ -310,7 +319,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if "request_time" in data:
             stats["total_response_time"] += datetime.now(timezone.utc) - data["request_time"]
             stats["answered"] += 1
-        # Обновляем статус в архиве на «В работе»
         if user_id in active_requests:
             await update_archive(context, user_id, "🔄 В работе")
     except Exception as e:
@@ -338,6 +346,7 @@ def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CallbackQueryHandler(send_contact_callback, pattern=r"^sendcontact_"))
     app.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rating_"))
