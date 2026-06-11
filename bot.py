@@ -28,6 +28,9 @@ BUTTONS = [
 ]
 reply_keyboard = ReplyKeyboardMarkup(BUTTONS, resize_keyboard=True, one_time_keyboard=False)
 
+# Список кнопок, требующих уточнения
+DETAIL_BUTTONS = {"🚢 Рассчитать маршрут", "💰 Запросить ставку"}
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветствие и показ кнопок."""
     await update.message.reply_text(
@@ -41,9 +44,26 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
 
     user_info = f"@{user.username}" if user.username else user.full_name
+
+    # Если нажата одна из кнопок «Рассчитать маршрут» или «Запросить ставку»,
+    # просим уточнить данные и не пересылаем админам
+    if msg.text and msg.text.strip() in DETAIL_BUTTONS:
+        await msg.reply_text(
+            "📋 Для отправки запроса, пожалуйста, укажите:\n"
+            "• Что за груз (наименование, вес, объём)\n"
+            "• Откуда и куда\n"
+            "• Характеристики груза (опасный, температурный режим и пр.)\n"
+            "• Условия поставки (EXW, FOB, FCA и т.д.)\n"
+            "• Предпочтительный вид транспорта (авиа, ж/д, авто, море)\n\n"
+            "Просто напишите всё, что знаете — мы оперативно рассчитаем.",
+            reply_markup=reply_keyboard
+        )
+        return  # останавливаемся, не идём в пересылку
+
+    # Если сообщение не кнопка-запрос — обрабатываем как обычную заявку
     caption = f"📩 Сообщение от {user_info} (ID: {user.id})"
 
-    # 1. Пересылаем сообщение в админский чат
+    # 1. Пересылаем в админский чат
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
