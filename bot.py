@@ -12,6 +12,7 @@ from telegram import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardRemove,
 )
 from telegram.ext import (
     Application,
@@ -67,6 +68,10 @@ WELCOME_TEXT = "👋 Добро пожаловать в Wenge Group!\n\nВыбе
 
 def get_channel_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")]])
+
+async def admin_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для принудительной установки админской клавиатуры."""
+    await update.message.reply_text("✅ Админская клавиатура обновлена.", reply_markup=get_admin_keyboard())
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -132,7 +137,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user_info = f"@{user.username}" if user.username else user.full_name
 
-    # СБОР КОНТАКТОВ (только при первом входе)
     if user.id in user_state:
         state = user_state[user.id]
         if state == "awaiting_name":
@@ -147,13 +151,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text("✅ Контакты сохранены! Выберите действие или напишите запрос.", reply_markup=get_user_keyboard())
             return
 
-    # ПЕРВЫЙ ВХОД — запрос контактов
     if user.id not in user_contacts:
         user_state[user.id] = "awaiting_name"
         await msg.reply_text("👤 Добро пожаловать! Для начала, пожалуйста, представьтесь. Напишите ваше имя:", reply_markup=get_user_keyboard())
         return
 
-    # ИСТОРИЯ
     if msg.text and msg.text.strip() == HISTORY_BUTTON:
         requests = user_requests.get(user.id, [])
         if not requests:
@@ -166,7 +168,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(text)
         return
 
-    # КНОПКИ-УТОЧНИТЕЛИ (контакты уже есть)
     if msg.text and msg.text.strip() in DETAIL_BUTTONS:
         if msg.text.strip() == "📋 Другое":
             await msg.reply_text("📋 Напишите ваш вопрос — мы ответим в ближайшее время.", reply_markup=get_user_keyboard())
@@ -177,7 +178,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
 
-    # ОБЫЧНЫЙ ЗАПРОС
     content_text = msg.text or "[Сообщение]"
     if msg.caption: content_text = f"[Файл] {msg.caption}"
     elif msg.photo: content_text = "[Фото]"
@@ -265,6 +265,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("admin", admin_keyboard_command))  # НОВАЯ КОМАНДА
     app.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rating_"))
     app.add_handler(MessageHandler(filters.Chat(chat_id=ADMIN_CHAT_ID) & ~filters.REPLY & ~filters.COMMAND, handle_admin_message))
     app.add_handler(MessageHandler(filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY, handle_admin_reply))
