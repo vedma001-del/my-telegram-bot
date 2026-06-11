@@ -47,17 +47,16 @@ user_contacts = {}
 user_state = {}
 stats = {"today": 0, "answered": 0, "total_response_time": timedelta()}
 
-# Клавиатура для пользователей
+# Клавиатура для пользователей (основная)
 BUTTONS = [
     [KeyboardButton("🚢 Рассчитать маршрут"), KeyboardButton("💰 Запросить ставку")],
     [KeyboardButton("📋 Мои заявки"), KeyboardButton("📋 Другое")],
 ]
-reply_keyboard = ReplyKeyboardMarkup(BUTTONS, resize_keyboard=True, one_time_keyboard=False)
+reply_keyboard = ReplyKeyboardMarkup(BUTTONS, resize_keyboard=True)
 
-# Кнопки, требующие уточнения (не пересылаются админам сразу)
+# Кнопки-уточнители (не пересылаются, а вызывают подсказку)
 DETAIL_BUTTONS = {"🚢 Рассчитать маршрут", "💰 Запросить ставку", "📋 Другое"}
 HISTORY_BUTTON = "📋 Мои заявки"
-OTHER_BUTTON = "📋 Другое"
 
 WELCOME_TEXT = (
     "👋 Добро пожаловать в Wenge Group!\n\n"
@@ -70,11 +69,17 @@ def get_channel_keyboard():
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приветствие только по /start (или при первом касании, но не после каждого сообщения)."""
+    user = update.effective_user
+    # Показываем клавиатуру и приветствие
     await update.message.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
     await update.message.reply_text(
         "Будьте в курсе новостей логистики:",
         reply_markup=get_channel_keyboard(),
     )
+    # Инициализируем историю, если ещё нет
+    if user.id not in user_requests:
+        user_requests[user.id] = []
 
 def save_to_history(user_id, text):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -93,13 +98,13 @@ async def remind_later(context, chat_id, message_id, delay_minutes):
         except Exception as e:
             logger.error(f"Ошибка отправки напоминания: {e}")
 
-# Callback для отправки контактов админом (выбор менеджера)
+# Callback для отправки контактов админом
 async def send_contact_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # "sendcontact_valeria_<user_id>" или "sendcontact_anton_<user_id>"
+    data = query.data
     parts = data.split("_")
-    manager = parts[1]  # valeria или anton
+    manager = parts[1]
     user_id = int(parts[2])
 
     if manager == "valeria":
@@ -133,7 +138,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user_info = f"@{user.username}" if user.username else user.full_name
 
-    # Сбор контактов (имя и телефон)
+    # 1. Сбор контактов (если пользователь в состоянии ожидания)
     if user.id in user_state:
         state = user_state[user.id]
         if state == "awaiting_name":
@@ -161,7 +166,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-    # Новый пользователь → запрос контактов
+    # 2. Новый пользователь, ещё не дал контакты → запрашиваем
     if user.id not in user_contacts:
         user_state[user.id] = "awaiting_name"
         await msg.reply_text(
@@ -170,14 +175,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Первое сообщение после регистрации → приветствие
-    if user.id not in user_requests or len(user_requests[user.id]) == 0:
-        await msg.reply_text(WELCOME_TEXT, reply_markup=reply_keyboard)
-        await msg.reply_text("Будьте в курсе новостей логистики:", reply_markup=get_channel_keyboard())
-        user_requests[user.id] = []
-        return
-
-    # История заявок
+    # 3. Кнопка «Мои заявки» (история)
     if msg.text and msg.text.strip() == HISTORY_BUTTON:
         requests = user_requests.get(user.id, [])
         if not requests:
@@ -190,9 +188,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(text)
         return
 
-    # Кнопки, требующие уточнения («Рассчитать маршрут», «Запросить ставку», «Другое»)
+    # 4. Кнопки-уточнители (не пересылаем, а просим уточнить)
     if msg.text and msg.text.strip() in DETAIL_BUTTONS:
-        if msg.text.strip() == OTHER_BUTTON:
+        if msg.text.strip() == "📋 Другое":
             await msg.reply_text(
                 "📋 Напишите, что вас интересует, или задайте ваш вопрос — мы ответим в ближайшее время.",
                 reply_markup=reply_keyboard,
@@ -210,7 +208,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
 
-    # Обычная заявка (любой другой текст или медиа)
+    # 5. Всё остальное — это настоящий запрос, пересылаем админам
     contact = user_contacts.get(user.id, {})
     name = contact.get("name", "")
     phone = contact.get("phone", "")
@@ -230,7 +228,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_to_message_id=forwarded.message_id,
     )
 
-    # Определяем текстовое представление для архива и истории
+    # Текст для архива и истории
     if msg.text:
         content_text = msg.text
     elif msg.caption:
@@ -284,7 +282,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not data:
         return
 
-    # Команда /contacts с выбором менеджера (только для админов)
+    # Команда /contacts с выбором менеджера
     if msg.text and msg.text.startswith("/contacts"):
         user_id = data["user_id"]
         keyboard = InlineKeyboardMarkup([
@@ -296,7 +294,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.reply_text("Выберите менеджера для отправки контактов:", reply_markup=keyboard)
         return
 
-    # Обычный ответ (reply)
+    # Обычный ответ
     data["answered"] = True
     user_id = data["user_id"]
     try:
@@ -308,7 +306,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             stats["total_response_time"] += response_time
             stats["answered"] += 1
 
-        # Оценка качества ответа
+        # Оценка
         rating_keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("👍", callback_data=f"rating_yes_{user_id}"),
