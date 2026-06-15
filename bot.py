@@ -116,14 +116,6 @@ def update_today_stats(total_delta=0, answered_delta=0, time_delta=0.0):
                    (today, total_delta, answered_delta, time_delta, total_delta, answered_delta, time_delta))
     conn.commit()
 
-async def remove_webhook_and_conflicts(app):
-    """Удаляет вебхук и сбрасывает все старые подключения при старте."""
-    try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Предыдущие подключения сброшены.")
-    except Exception as e:
-        logger.error(f"Ошибка сброса: {e}")
-
 async def remind_later(context, chat_id, message_id, delay_minutes):
     await asyncio.sleep(delay_minutes * 60)
     if message_map.get(message_id, {}).get("answered", False) is False:
@@ -277,9 +269,6 @@ def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Сбрасываем конфликты перед запуском
-    asyncio.run(remove_webhook_and_conflicts(app))
-    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rating_"))
     app.add_handler(MessageHandler(filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_stats), group=0)
@@ -287,7 +276,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_user_message), group=2)
     
     logger.info("Бот запущен и готов к работе...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
