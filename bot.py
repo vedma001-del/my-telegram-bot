@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 # ---------- НАСТРОЙКИ (замени на свои) ----------
-BOT_TOKEN = "8906719433:AAHsjj0c1JxGwheqHH4-J0pr0sOlPEwPSqw"
+BOT_TOKEN = "8906719433:AAEEMJHLQjw_W0mBmVd7Bgb2ummKfdhJWyY"
 ADMIN_CHAT_ID = -1003725679213       # ID группы администраторов
 ARCHIVE_GROUP_ID = -1003908640963    # ID группы-архива заявок
 CHANNEL_USERNAME = "WengeGroup"  # юзернейм канала (без @)
