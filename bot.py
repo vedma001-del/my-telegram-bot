@@ -22,7 +22,6 @@ user_state = {}
 def get_user_keyboard():
     buttons = [
         [KeyboardButton("💰 Запросить ставку"), KeyboardButton("📋 Другое")],
-        [KeyboardButton("📋 Мои заявки")],
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -53,7 +52,11 @@ async def save_contact(context, user_id, name):
         logger.error(f"Ошибка сохранения: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Добро пожаловать! Выберите действие.", reply_markup=get_user_keyboard())
+    await update.message.reply_text(
+        "👋 Добро пожаловать в Wenge Group!\n\n"
+        "Выберите, что вас интересует, или просто напишите свой вопрос — мы ответим в ближайшее время.",
+        reply_markup=get_user_keyboard()
+    )
 
 async def handle_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -77,24 +80,26 @@ async def handle_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Кнопки
     if msg.text == "📋 Другое":
-        await msg.reply_text("📋 Напишите ваш вопрос.")
+        await msg.reply_text("📋 Напишите ваш вопрос — мы ответим в ближайшее время.")
         return
     if msg.text == "💰 Запросить ставку":
-        await msg.reply_text("📋 Для расчёта ставки, пожалуйста, укажите:\n"
-                "• Что за груз (наименование, вес, объём)\n"
-                "• Откуда и куда\n"
-                "• Характеристики груза\n"
-                "• Условия поставки (EXW, FOB, FCA)\n"
-                "• Вид транспорта\n\n"
-                "Напишите всё, что знаете — мы оперативно рассчитаем.")
+        await msg.reply_text(
+            "📋 Для расчёта ставки, пожалуйста, укажите:\n"
+            "• Что за груз (наименование, вес, объём)\n"
+            "• Откуда и куда\n"
+            "• Характеристики груза\n"
+            "• Условия поставки (EXW, FOB, FCA)\n"
+            "• Вид транспорта\n\n"
+            "Напишите всё, что знаете — мы оперативно рассчитаем."
+        )
         return
 
-    # Пересылаем запрос
+    # Пересылаем запрос в админский чат
     user_info = f"@{user.username}" if user.username else user.full_name
     caption = f"📩 {user_info} (ID: {user.id})"
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_to_message_id=forwarded.message_id)
-    await msg.reply_text("✅ Сообщение отправлено. Ожидайте ответа.")
+    await msg.reply_text("✅ Ваше сообщение отправлено. Ожидайте ответа.")
 
 async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -102,10 +107,22 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Определяем ID клиента
     user_id = None
+    
+    # Способ 1: через forward_origin
     if msg.reply_to_message.forward_origin:
         user_id = msg.reply_to_message.forward_origin.sender_user.id
     
-    if not user_id: return
+    # Способ 2: через текст подписи бота (если есть "ID: 123456")
+    if not user_id and msg.reply_to_message.text and "ID:" in msg.reply_to_message.text:
+        try:
+            id_part = msg.reply_to_message.text.split("ID:")[1].split(")")[0].strip()
+            user_id = int(id_part)
+        except:
+            pass
+    
+    if not user_id:
+        await msg.reply_text("❌ Не удалось определить клиента.")
+        return
 
     # Команда /close
     if msg.text and msg.text.startswith("/close"):
@@ -116,10 +133,11 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Обычный ответ
     try:
-        await msg.copy(chat_id=user_id)
-        await msg.reply_text("✅ Ответ отправлен.")
-    except:
-        await msg.reply_text("❌ Ошибка.")
+        await context.bot.send_message(chat_id=user_id, text=msg.text or "[сообщение]")
+        await msg.reply_text("✅ Ответ отправлен клиенту.")
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {e}")
+        await msg.reply_text("❌ Не удалось отправить ответ.")
 
 async def rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -153,4 +171,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
