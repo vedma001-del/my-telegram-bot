@@ -116,6 +116,14 @@ def update_today_stats(total_delta=0, answered_delta=0, time_delta=0.0):
                    (today, total_delta, answered_delta, time_delta, total_delta, answered_delta, time_delta))
     conn.commit()
 
+async def remove_webhook_and_conflicts(app):
+    """Удаляет вебхук и сбрасывает все старые подключения при старте."""
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Предыдущие подключения сброшены.")
+    except Exception as e:
+        logger.error(f"Ошибка сброса: {e}")
+
 async def remind_later(context, chat_id, message_id, delay_minutes):
     await asyncio.sleep(delay_minutes * 60)
     if message_map.get(message_id, {}).get("answered", False) is False:
@@ -139,10 +147,8 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not msg.reply_to_message:
         return
 
-    # Используем старый добрый message_map
     data = message_map.get(msg.reply_to_message.message_id)
     if not data:
-        # Если сообщение не является заявкой (например, reply на системное сообщение) — просто выходим молча
         return
 
     user_id = data["user_id"]
@@ -159,7 +165,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_message(chat_id=user_id, text="Ваш запрос закрыт. Оцените качество обслуживания:", reply_markup=kb)
         await msg.reply_text("✅ Заявка закрыта.", reply_markup=get_admin_keyboard())
     else:
-        # Обычный ответ клиенту
         data["answered"] = True
         await msg.copy(chat_id=user_id)
         await msg.reply_text("✅ Ответ отправлен.", reply_markup=get_admin_keyboard())
@@ -185,7 +190,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     db_user = get_user_from_db(user.id)
 
-    # Регистрация новых пользователей
     if not db_user and user.id not in user_state:
         user_state[user.id] = "awaiting_name"
         await msg.reply_text("👤 Добро пожаловать! Представьтесь, пожалуйста. Напишите ваше имя:", reply_markup=get_user_keyboard())
@@ -204,7 +208,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text("✅ Контакты сохранены! Выберите действие или напишите запрос.", reply_markup=get_user_keyboard())
             return
 
-    # История
     if msg.text == HISTORY_BUTTON:
         requests = get_user_requests(user.id, limit=10)
         if not requests:
@@ -217,12 +220,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(text)
         return
 
-    # Кнопки-уточнители
     if msg.text in DETAIL_BUTTONS:
         if msg.text == "📋 Другое":
             await msg.reply_text("📋 Напишите ваш вопрос — мы ответим в ближайшее время.", reply_markup=get_user_keyboard())
         else:
-            # Вернул старое описание для ставки
             await msg.reply_text(
                 "📋 Для расчёта ставки, пожалуйста, укажите:\n"
                 "• Что за груз (наименование, вес, объём)\n"
@@ -235,7 +236,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
 
-    # Обработка запроса
     content_text = msg.text or "[Сообщение]"
     if msg.caption: content_text = f"[Файл] {msg.caption}"
     elif msg.photo: content_text = "[Фото]"
@@ -247,10 +247,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_to_message_id=forwarded.message_id)
 
-    # Статистика
     update_today_stats(total_delta=1)
 
-    # Архив
     active_req = get_active_request(user.id)
     if not active_req:
         archive_msg = await context.bot.send_message(
@@ -278,6 +276,9 @@ def run_health_server():
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Сбрасываем конфликты перед запуском
+    asyncio.run(remove_webhook_and_conflicts(app))
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rating_"))
