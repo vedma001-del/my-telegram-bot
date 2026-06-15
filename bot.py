@@ -67,7 +67,7 @@ async def handle_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = msg.text
         await save_contact(context, user.id, name)
         del user_state[user.id]
-        await msg.reply_text(f"✅ Спасибо, {name}! Напишите ваш запрос.", reply_markup=get_user_keyboard())
+        await msg.reply_text(f"✅ Спасибо, {name}! Напишите ваш вопрос.", reply_markup=get_user_keyboard())
         return
     else:
         # Запрашиваем имя
