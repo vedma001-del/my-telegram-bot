@@ -4,173 +4,124 @@ import threading
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+)
 
 # ---------- НАСТРОЙКИ (замените на свои) ----------
 BOT_TOKEN = "8906719433:AAEEMJHLQjw_W0mBmVd7Bgb2ummKfdhJWyY"
 ADMIN_CHAT_ID = -1003725679213
-CONTACTS_STORAGE_ID = -1003908640963
 # -------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-user_contacts_cache = {}
-user_state = {}
-message_map = {}  # {forwarded_msg_id: user_id}
-
-def get_user_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("💰 Запросить ставку"), KeyboardButton("📋 Другое")],
-    ], resize_keyboard=True)
-
-async def load_contacts(app):
-    global user_contacts_cache
-    try:
-        updates = await app.bot.get_updates(offset=-100, timeout=5)
-        if updates:
-            for u in updates:
-                if u.message and u.message.text and u.message.text.startswith("👤 Контакт:"):
-                    try:
-                        text = u.message.text
-                        id_part = text.split("ID:")[1].strip()
-                        user_id = int(id_part)
-                        name_part = text.split("👤 Контакт:")[1].split("|")[0].strip()
-                        user_contacts_cache[user_id] = {"name": name_part}
-                    except:
-                        continue
-        logger.info(f"✅ Загружено {len(user_contacts_cache)} контактов")
-    except Exception as e:
-        logger.warning(f"Ошибка загрузки контактов: {e}")
-
-async def save_contact(context, user_id, name):
-    try:
-        await context.bot.send_message(chat_id=CONTACTS_STORAGE_ID, text=f"👤 Контакт: {name} | ID: {user_id}")
-        user_contacts_cache[user_id] = {"name": name}
-    except Exception as e:
-        logger.error(f"Ошибка сохранения: {e}")
+# Здесь хранится связь: ID пересланного сообщения → ID пользователя, которому отвечать
+message_map = {}
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(msg="Ошибка при обработке:", exc_info=context.error)
+    """Любые ошибки просто логируются, бот не падает."""
+    logger.error(msg="Ошибка:", exc_info=context.error)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приветствие на /start."""
     await update.message.reply_text(
         "👋 Добро пожаловать в Wenge Group!\n\n"
-        "Выберите, что вас интересует, или просто напишите свой вопрос — мы ответим в ближайшее время.",
-        reply_markup=get_user_keyboard()
+        "Просто напишите ваш вопрос, и мы ответим в ближайшее время."
     )
 
-async def handle_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылает сообщение клиента в админский чат."""
     user = update.effective_user
     msg = update.message
 
-    # 1. Проверка контактов
-    if user.id in user_contacts_cache:
-        pass  # уже знакомы
-    elif user.id in user_state:
-        # ожидаем имя
-        name = msg.text
-        await save_contact(context, user.id, name)
-        del user_state[user.id]
-        await msg.reply_text(f"✅ Спасибо, {name}! Задайте ваш вопрос.", reply_markup=get_user_keyboard())
-        return
-    else:
-        # новый пользователь → просим имя
-        user_state[user.id] = "awaiting_name"
-        await msg.reply_text("👤 Добро пожаловать! Напишите ваше имя:", reply_markup=get_user_keyboard())
-        return
-
-    # 2. Кнопки
-    if msg.text == "📋 Другое":
-        await msg.reply_text("📋 Напишите ваш вопрос — мы ответим в ближайшее время.")
-        return
-    if msg.text == "💰 Запросить ставку":
-        await msg.reply_text(
-            "📋 Для расчёта ставки, пожалуйста, укажите:\n"
-            "• Что за груз (наименование, вес, объём)\n"
-            "• Откуда и куда\n"
-            "• Характеристики груза\n"
-            "• Условия поставки (EXW, FOB, FCA)\n"
-            "• Вид транспорта\n\n"
-            "Напишите всё, что знаете — мы оперативно рассчитаем."
-        )
-        return
-
-    # 3. Пересылаем запрос в админский чат
+    # Формируем подпись с именем пользователя
     user_info = f"@{user.username}" if user.username else user.full_name
-    caption = f"📩 {user_info} (ID: {user.id})"
-    forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
-    # Сохраняем связку: ID пересланного сообщения → ID клиента
-    message_map[forwarded.message_id] = user.id
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_to_message_id=forwarded.message_id)
-    await msg.reply_text("✅ Сообщение отправлено. Ожидайте ответа.")
+    caption = f"📩 Сообщение от {user_info} (ID: {user.id})"
 
-async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Пересылаем сообщение в админский чат
+    forwarded = await msg.forward(chat_id=ADMIN_CHAT_ID)
+    # Запоминаем, какому пользователю нужно ответить, когда админ ответит на это сообщение
+    message_map[forwarded.message_id] = user.id
+    # Отправляем текстовую подпись отдельным сообщением, привязанным к пересланному
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=caption,
+        reply_to_message_id=forwarded.message_id,
+    )
+    # Подтверждение клиенту
+    await msg.reply_text("✅ Ваше сообщение отправлено. Ожидайте ответа.")
+
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылает ответ админа обратно клиенту."""
     msg = update.message
+    # Если админ отправил сообщение без reply (не ответ на пересланное), игнорируем
     if not msg.reply_to_message:
         return
 
-    # Ищем ID клиента в нашем словаре
-    original_msg_id = msg.reply_to_message.message_id
-    user_id = message_map.get(original_msg_id)
-
+    # Находим ID клиента, которому нужно ответить
+    user_id = message_map.get(msg.reply_to_message.message_id)
     if not user_id:
         await msg.reply_text("❌ Не удалось определить клиента. Убедитесь, что отвечаете на пересланное сообщение.")
         return
 
-    # Команда /close
-    if msg.text and msg.text.startswith("/close"):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👍", callback_data=f"yes_{user_id}"),
-             InlineKeyboardButton("👎", callback_data=f"no_{user_id}")]
-        ])
-        await context.bot.send_message(chat_id=user_id, text="Оцените качество обслуживания:", reply_markup=kb)
-        await msg.reply_text("✅ Заявка закрыта.")
-        return
-
-    # Обычный ответ клиенту
+    # Пересылаем ответ клиенту (поддерживаются текст, фото, файлы и т.д.)
     try:
-        # Пересылаем сообщение админа клиенту
         await msg.copy(chat_id=user_id)
         await msg.reply_text("✅ Ответ отправлен клиенту.")
     except Exception as e:
         logger.error(f"Ошибка отправки ответа: {e}")
         await msg.reply_text("❌ Не удалось отправить ответ.")
 
-async def rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("👍 Спасибо за отзыв!")
-
+# Фиктивный веб-сервер, чтобы Render видел, что сервис жив
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
 
-def run_health():
-    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthHandler).serve_forever()
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+async def cleanup(app):
+    """Сбрасывает старые подключения, чтобы не было ошибок Conflict."""
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Вебхук удалён, pending updates сброшены.")
 
 def main():
-    threading.Thread(target=run_health, daemon=True).start()
+    # Запускаем веб-сервер в фоновом потоке, чтобы Render не ругался
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Загружаем контакты
+    # Сброс старых подключений перед запуском
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(load_contacts(app))
+    loop.run_until_complete(cleanup(app))
 
-    # Добавляем обработчик ошибок
     app.add_error_handler(error_handler)
 
+    # Обработчики
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(rating, pattern=r"^yes_|^no_"))
-    app.add_handler(MessageHandler(filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY, handle_admin), group=1)
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_user), group=2)
+    # Ответы админов (только в админском чате, только reply)
+    app.add_handler(MessageHandler(
+        filters.Chat(chat_id=ADMIN_CHAT_ID) & filters.REPLY,
+        handle_admin_reply
+    ))
+    # Сообщения от клиентов (личные сообщения боту, кроме команд)
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_user_message
+    ))
 
-    logger.info("Бот запущен...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    logger.info("Бот запущен и готов к работе...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
